@@ -101,15 +101,16 @@ func toSolutionDTO(s osmotic.Solution) feedSolutionDTO {
 		TemperatureK: s.Temperature,
 		VanTHoff:     s.VanTHoff,
 	}
-	if s.Molarity != 0 {
+	// 以存在性标记为准：显式给的 0 必须原样回显，不能在 GET 时凭空消失。
+	if s.HasMolarity() {
 		v := s.Molarity
 		dto.Molarity = &v
 	}
-	if s.MassConcentration != 0 {
+	if s.HasMassConcentration() {
 		v := s.MassConcentration
 		dto.MassConcentration = &v
 	}
-	if s.MolarMass != 0 {
+	if s.HasMolarMass() {
 		v := s.MolarMass
 		dto.MolarMass = &v
 	}

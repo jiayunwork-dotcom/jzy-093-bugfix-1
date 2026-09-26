@@ -192,23 +192,25 @@ func decodeSpec(w http.ResponseWriter, req *http.Request) (specDTO, bool) {
 }
 
 func specFromDTO(dto specDTO) (cases.Spec, error) {
-	feed := osmotic.Solution{
+	// 经 SetXxx 进入内核：字段在请求里出现过（哪怕显式给 0）与压根没出现，
+	// 在内核里必须是两种不同的工况。
+	feed := &osmotic.Solution{
 		Temperature: dto.Feed.TemperatureK,
 		VanTHoff:    dto.Feed.VanTHoff,
 	}
 	if dto.Feed.Molarity != nil {
-		feed.Molarity = *dto.Feed.Molarity
+		feed.SetMolarity(*dto.Feed.Molarity)
 	}
 	if dto.Feed.MassConcentration != nil {
-		feed.MassConcentration = *dto.Feed.MassConcentration
+		feed.SetMassConcentration(*dto.Feed.MassConcentration)
 	}
 	if dto.Feed.MolarMass != nil {
-		feed.MolarMass = *dto.Feed.MolarMass
+		feed.SetMolarMass(*dto.Feed.MolarMass)
 	}
 	return cases.Spec{
 		Name: dto.Name,
 		FeedSpec: membrane.FeedSpec{
-			Feed:            feed,
+			Feed:            *feed,
 			AppliedPressure: dto.AppliedPressureBar,
 			FeedFlow:        dto.FeedFlowLh,
 			Permeability:    dto.PermeabilityLMH,

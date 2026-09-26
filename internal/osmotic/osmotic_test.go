@@ -1,8 +1,12 @@
 package osmotic
 
 import (
+	"errors"
 	"math"
+	"strings"
 	"testing"
+
+	"rocalc/internal/validation"
 )
 
 func TestPressure_NaClHandCalc(t *testing.T) {
@@ -89,4 +93,101 @@ func TestEffectiveMolarity_MassAndMolarConsistency(t *testing.T) {
 	if _, err := bad.EffectiveMolarity(); err == nil {
 		t.Fatal("摩尔浓度与质量浓度换算不自洽时必须拒绝")
 	}
+}
+
+// codeFrom 返回错误携带的稳定错误码，非领域错误返回空串。
+func codeFrom(err error) string {
+	var de *validation.DomainError
+	if errors.As(err, &de) {
+		return de.Code
+	}
+	return ""
+}
+
+// TestEffectiveMolarity_ExplicitZeroIsPresent 钉死“显式给 0”和“压根没给”的区别。
+// 经 SetXxx 进入（对应 HTTP/登记表路径）的字段，0 也是给出，内核不得替调用方
+// 悄悄挑另一边。
+func TestEffectiveMolarity_ExplicitZeroIsPresent(t *testing.T) {
+	// 显式摩尔浓度 0 撞上非零质量浓度：与给 0.05 一样判 inconsistent_concentration，
+	// 不能把 0 当没写、转而采用质量口径。
+	var conflicting Solution
+	conflicting.SetMolarity(0)
+	conflicting.SetMassConcentration(5)
+	conflicting.SetMolarMass(58.44)
+	c, err := conflicting.EffectiveMolarity()
+	if codeFrom(err) != validation.CodeInconsistentConcentration {
+		t.Fatalf("显式摩尔浓度 0 与非零质量浓度冲突应报 %s，实际 c=%g err=%v",
+			validation.CodeInconsistentConcentration, c, err)
+	}
+	if got := err.Error(); !containsAll(got, "0", "0.0855", "5", "58.44") {
+		t.Fatalf("拒绝原因应同时带上两边数值（摩尔 0、换算值、质量浓度、摩尔质量），实际：%s", got)
+	}
+
+	// 纯水写法一：只带摩尔浓度 0，其余浓度项都不带。
+	var pureMolar Solution
+	pureMolar.SetMolarity(0)
+	if c, err := pureMolar.EffectiveMolarity(); err != nil || c != 0 {
+		t.Fatalf("只给摩尔浓度 0 应按纯水 0 mol/L 出结果，实际 c=%g err=%v", c, err)
+	}
+
+	// 纯水写法二：三项都带，但摩尔浓度 0、质量浓度 0、摩尔质量为正。
+	var pureBoth Solution
+	pureBoth.SetMolarity(0)
+	pureBoth.SetMassConcentration(0)
+	pureBoth.SetMolarMass(58.44)
+	if c, err := pureBoth.EffectiveMolarity(); err != nil || c != 0 {
+		t.Fatalf("两边都是 0（摩尔质量为正）应按纯水出结果，实际 c=%g err=%v", c, err)
+	}
+
+	// 质量浓度显式给 0 却没给摩尔质量：与给非零质量浓度一样拦下，
+	// 不能因为数值是 0 就把这个字段当没写、再按摩尔口径放行。
+	var zeroMassNoMMass Solution
+	zeroMassNoMMass.SetMolarity(0.1)
+	zeroMassNoMMass.SetMassConcentration(0)
+	if _, err := zeroMassNoMMass.EffectiveMolarity(); codeFrom(err) != validation.CodeNonPositiveParameter {
+		t.Fatalf("显式质量浓度 0 缺摩尔质量应报 %s，实际 err=%v",
+			validation.CodeNonPositiveParameter, err)
+	}
+	var massOnlyZero Solution
+	massOnlyZero.SetMassConcentration(0)
+	if _, err := massOnlyZero.EffectiveMolarity(); codeFrom(err) != validation.CodeNonPositiveParameter {
+		t.Fatalf("只给质量浓度 0、不给摩尔质量也应报 %s，实际 err=%v",
+			validation.CodeNonPositiveParameter, err)
+	}
+
+	// 自洽地同时给（5 g/L ÷ 58.44 ≈ 0.08556）照常放行，数值一位不变。
+	var consistent Solution
+	consistent.SetMolarity(5.0 / 58.44)
+	consistent.SetMassConcentration(5.0)
+	consistent.SetMolarMass(58.44)
+	if c, err := consistent.EffectiveMolarity(); err != nil || math.Abs(c-5.0/58.44) > 1e-12 {
+		t.Fatalf("自洽口径应照常采用摩尔浓度，实际 c=%g err=%v", c, err)
+	}
+}
+
+// TestSolution_PresenceAccessors 确认存在性标记与 GET 回显依据的语义：
+// 显式给 0 的字段 Has* 为 true；没给的为 false。
+func TestSolution_PresenceAccessors(t *testing.T) {
+	var s Solution
+	s.SetMolarity(0)
+	s.SetMassConcentration(0)
+	s.SetMolarMass(58.44)
+	if !s.HasMolarity() || !s.HasMassConcentration() || !s.HasMolarMass() {
+		t.Fatal("经 SetXxx 给出（含 0）的字段必须报告为已给出")
+	}
+
+	// 字面量直接构造（内置档/内核代码路径）沿用历史“非零即给出”口径。
+	lit := Solution{MassConcentration: 5, MolarMass: 58.44}
+	if lit.HasMolarity() || !lit.HasMassConcentration() || !lit.HasMolarMass() {
+		t.Fatal("字面量构造的存在性应按非零推断，内置质量口径构造被误判")
+	}
+}
+
+func containsAll(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if !strings.Contains(s, sub) {
+			return false
+		}
+	}
+	return true
 }
