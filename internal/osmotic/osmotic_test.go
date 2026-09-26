@@ -1,9 +1,20 @@
 package osmotic
 
 import (
+	"errors"
 	"math"
 	"testing"
+
+	"rocalc/internal/validation"
 )
+
+func codeOf(err error) string {
+	var de *validation.DomainError
+	if errors.As(err, &de) {
+		return de.Code
+	}
+	return ""
+}
 
 func TestPressure_NaClHandCalc(t *testing.T) {
 	// 0.1 mol/L NaCl，i=2，25 ℃：
@@ -88,5 +99,40 @@ func TestEffectiveMolarity_MassAndMolarConsistency(t *testing.T) {
 		Temperature: 298.15, VanTHoff: 2}
 	if _, err := bad.EffectiveMolarity(); err == nil {
 		t.Fatal("摩尔浓度与质量浓度换算不自洽时必须拒绝")
+	}
+}
+
+func TestEffectiveMolarity_ExplicitZeroVersusAbsent(t *testing.T) {
+	// 「写了 0」与「没写」必须区分：显式 molarity=0 撞上非零质量浓度，
+	// 与 molarity=0.05 一样不自洽，不能悄悄改用质量浓度那一边。
+	conflict := Solution{
+		Molarity: 0, MolaritySet: true,
+		MassConcentration: 5, MolarMass: 58.44,
+		Temperature: 298.15, VanTHoff: 2,
+	}
+	if _, err := conflict.EffectiveMolarity(); codeOf(err) != validation.CodeInconsistentConcentration {
+		t.Fatalf("显式 0 摩尔浓度与 5 g/L 并存应报 %s，实际 %v",
+			validation.CodeInconsistentConcentration, err)
+	}
+
+	// 质量浓度显式出现（哪怕是 0）却没配摩尔质量：与写 5 时一样被拦下。
+	zeroMassNoMolarMass := Solution{MassConcentrationSet: true, Temperature: 298.15, VanTHoff: 2}
+	if _, err := zeroMassNoMolarMass.EffectiveMolarity(); codeOf(err) != validation.CodeNonPositiveParameter {
+		t.Fatalf("质量浓度显式为 0 且缺摩尔质量应报 %s，实际 %v",
+			validation.CodeNonPositiveParameter, err)
+	}
+
+	// 纯水两种写法照旧按 0 mol/L：只给 molarity=0；
+	// 或三项都给且 molarity=0、mass=0、摩尔质量为正。
+	pureMolarOnly := Solution{MolaritySet: true, Temperature: 298.15, VanTHoff: 2}
+	if c, err := pureMolarOnly.EffectiveMolarity(); err != nil || c != 0 {
+		t.Fatalf("只给 molarity=0 应按纯水 0 处理，实际 c=%g err=%v", c, err)
+	}
+	pureTriple := Solution{
+		MolaritySet: true, MassConcentrationSet: true,
+		MolarMass: 58.44, Temperature: 298.15, VanTHoff: 2,
+	}
+	if c, err := pureTriple.EffectiveMolarity(); err != nil || c != 0 {
+		t.Fatalf("molarity=0、mass=0、摩尔质量为正应按纯水 0 处理，实际 c=%g err=%v", c, err)
 	}
 }

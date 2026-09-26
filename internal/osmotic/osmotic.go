@@ -17,13 +17,33 @@ const R = 0.08314
 //
 // 摩尔浓度与质量浓度二选一即可；若同时给 Molarity 与 MassConcentration+MolarMass，
 // 两者必须自洽（容差见 validation 包），否则拒绝。
+//
+// 「给没给」按显式标记或取值非零判定：HTTP 解码层会把请求里出现过的字段
+// （哪怕值是 0）对应的 Set 标记置位，借此区分「写了 0」与「压根没写」；
+// 直接构造 Solution 的调用方不置标记时，非零值本身即视为已给出。
 type Solution struct {
 	Molarity          float64 // 摩尔浓度 C，单位 mol/L
 	MassConcentration float64 // 质量浓度，单位 g/L（可选）
 	MolarMass         float64 // 溶质摩尔质量，单位 g/mol（可选）
 	Temperature       float64 // 热力学温度 T，单位 K
 	VanTHoff          float64 // 范特霍夫因子 i（NaCl 取 2）
+
+	// 显式给出标记：对应字段在请求里出现过即置位，哪怕值为 0。
+	MolaritySet          bool
+	MassConcentrationSet bool
+	MolarMassSet         bool
 }
+
+// HasMolarity 报告摩尔浓度是否被给出：显式标记置位，或取值非零。
+func (s Solution) HasMolarity() bool { return s.MolaritySet || s.Molarity != 0 }
+
+// HasMassConcentration 报告质量浓度是否被给出：显式标记置位，或取值非零。
+func (s Solution) HasMassConcentration() bool {
+	return s.MassConcentrationSet || s.MassConcentration != 0
+}
+
+// HasMolarMass 报告摩尔质量是否被给出：显式标记置位，或取值非零。
+func (s Solution) HasMolarMass() bool { return s.MolarMassSet || s.MolarMass != 0 }
 
 // FromMassConcentration 由质量浓度换算摩尔浓度：C = ρ/M。
 // 单位：ρ 为 g/L、M 为 g/mol，结果为 mol/L。
@@ -38,11 +58,13 @@ func FromMassConcentration(cMass, molarMass float64) (float64, error) {
 }
 
 // EffectiveMolarity 返回工况采用的摩尔浓度。
-// 直接给了 Molarity（>0 或为 0 的纯水）时以它为准；
+// 直接给了 Molarity（>0 或显式给 0 的纯水）时以它为准；
 // 否则用质量浓度除以摩尔质量换算。两种途径同时给时做自洽检查。
+// 显式给的 0 与「没给」严格区分：写了 0 就必须参与自洽与缺项校验，
+// 不允许静默改用另一边的口径。
 func (s Solution) EffectiveMolarity() (float64, error) {
-	haveMass := s.MassConcentration != 0 || s.MolarMass != 0
-	haveMolar := s.Molarity != 0
+	haveMass := s.HasMassConcentration() || s.HasMolarMass()
+	haveMolar := s.HasMolarity()
 	if haveMass && haveMolar {
 		if err := validation.CheckConcentrationConsistency(s.Molarity, s.MassConcentration, s.MolarMass); err != nil {
 			return 0, err

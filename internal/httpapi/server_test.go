@@ -231,3 +231,161 @@ func TestPutUpsertAndDelete(t *testing.T) {
 		t.Fatalf("删除后应 404，实际 %d", code)
 	}
 }
+
+// 设计院表单规矩：没填的框不带、填了 0 的框老老实实带 0。
+// 服务必须把「写了 0」和「没写」区分开。以下用例守住这条契约。
+
+// 显式 molarity=0 撞上非零质量浓度：与 molarity=0.05 一样判 inconsistent_concentration。
+const explicitZeroConflictBody = `{
+  "feed": {"molarity_mol_per_l": 0, "mass_concentration_g_per_l": 5,
+           "molar_mass_g_per_mol": 58.44, "temperature_k": 298.15, "vanth_hoff_factor": 2},
+  "applied_pressure_bar": 12, "feed_flow_lh": 1000,
+  "permeability_lmh_per_bar": 1.8, "area_m2": 36, "salt_rejection": 1
+}`
+
+func TestAdhocEvaluate_ExplicitZeroMolarityConflictsWithMass(t *testing.T) {
+	_, ts := newTestServer()
+	defer ts.Close()
+
+	code, resp := doJSON(t, ts, http.MethodPost, "/v1/evaluate", explicitZeroConflictBody)
+	if code != http.StatusBadRequest || resp["code"] != "inconsistent_concentration" {
+		t.Fatalf("显式 0 撞上 5 g/L 应 400 inconsistent_concentration，实际 %d %v", code, resp)
+	}
+	// 原因里必须同时带上两边的数值，不能只说「不自洽」。
+	reason, _ := resp["reason"].(string)
+	if !strings.Contains(reason, "直接给定 0 mol/L") || !strings.Contains(reason, "5 g/L ÷ 58.44 g/mol") {
+		t.Fatalf("原因应同时给出两侧数值，实际 %q", reason)
+	}
+
+	// 对照组：把 0 改成 0.05，判定必须一模一样。
+	body05 := strings.Replace(explicitZeroConflictBody,
+		`"molarity_mol_per_l": 0,`, `"molarity_mol_per_l": 0.05,`, 1)
+	code, resp = doJSON(t, ts, http.MethodPost, "/v1/evaluate", body05)
+	if code != http.StatusBadRequest || resp["code"] != "inconsistent_concentration" {
+		t.Fatalf("0.05 对照组应同样 400 inconsistent_concentration，实际 %d %v", code, resp)
+	}
+}
+
+func TestNamedCase_ExplicitZeroMolaritySameJudgmentAsAdhoc(t *testing.T) {
+	_, ts := newTestServer()
+	defer ts.Close()
+
+	// 同一份内容走「登记 + 点名核算」，判定必须与临时核算一致：
+	// 不能一个拒、一个算出结果。
+	regBody := strings.Replace(explicitZeroConflictBody, `{`, `{"name": "zero-conflict",`, 1)
+	if code, resp := doJSON(t, ts, http.MethodPost, "/v1/cases", regBody); code != http.StatusCreated {
+		t.Fatalf("登记应成功（合法性在核算时判定），实际 %d %v", code, resp)
+	}
+	code, resp := doJSON(t, ts, http.MethodPost, "/v1/cases/zero-conflict/evaluate", "")
+	if code != http.StatusBadRequest || resp["code"] != "inconsistent_concentration" {
+		t.Fatalf("点名核算应与临时核算同一判定，实际 %d %v", code, resp)
+	}
+
+	// 读回这份档：显式给的 0 必须原样还在，不能凭空消失。
+	code, resp = doJSON(t, ts, http.MethodGet, "/v1/cases/zero-conflict", "")
+	if code != http.StatusOK {
+		t.Fatalf("读回失败: %d %v", code, resp)
+	}
+	feed, _ := resp["feed"].(map[string]any)
+	molarity, present := feed["molarity_mol_per_l"]
+	if !present || molarity != 0.0 {
+		t.Fatalf("显式提交的 molarity_mol_per_l=0 读回必须原样保留，实际 %v", feed)
+	}
+}
+
+func TestAdhocEvaluate_ExplicitZeroMassConcentrationNeedsMolarMass(t *testing.T) {
+	_, ts := newTestServer()
+	defer ts.Close()
+
+	// 质量浓度只要显式出现，哪怕是 0，缺摩尔质量就得跟写 5 一样被拦下。
+	withZero := `{
+	  "feed": {"molarity_mol_per_l": 0.1, "mass_concentration_g_per_l": 0,
+	           "temperature_k": 298.15, "vanth_hoff_factor": 2},
+	  "applied_pressure_bar": 12, "feed_flow_lh": 1000,
+	  "permeability_lmh_per_bar": 1.8, "area_m2": 36, "salt_rejection": 1
+	}`
+	code, resp := doJSON(t, ts, http.MethodPost, "/v1/evaluate", withZero)
+	if code != http.StatusBadRequest || resp["code"] != "non_positive_parameter" {
+		t.Fatalf("质量浓度显式为 0 且缺摩尔质量应 400 non_positive_parameter，实际 %d %v", code, resp)
+	}
+	if reason, _ := resp["reason"].(string); !strings.Contains(reason, "摩尔质量") {
+		t.Fatalf("原因应指出摩尔质量缺失，实际 %q", reason)
+	}
+
+	// 对照组：质量浓度写 5，必须是同一个拦法。
+	withFive := strings.Replace(withZero,
+		`"mass_concentration_g_per_l": 0`, `"mass_concentration_g_per_l": 5`, 1)
+	code, resp = doJSON(t, ts, http.MethodPost, "/v1/evaluate", withFive)
+	if code != http.StatusBadRequest || resp["code"] != "non_positive_parameter" {
+		t.Fatalf("质量浓度 5 缺摩尔质量应同样被拦，实际 %d %v", code, resp)
+	}
+}
+
+func TestNamedCase_GetRoundTripPreservesExplicitZero(t *testing.T) {
+	_, ts := newTestServer()
+	defer ts.Close()
+
+	// 登记后再读回：字段要与提交时一一对应，显式给的 0 原样出现。
+	body := `{
+	  "name": "pure-water-zero",
+	  "feed": {"molarity_mol_per_l": 0, "temperature_k": 298.15, "vanth_hoff_factor": 2},
+	  "applied_pressure_bar": 12, "feed_flow_lh": 1000,
+	  "permeability_lmh_per_bar": 1.8, "area_m2": 36, "salt_rejection": 1
+	}`
+	if code, resp := doJSON(t, ts, http.MethodPost, "/v1/cases", body); code != http.StatusCreated {
+		t.Fatalf("纯水档登记失败: %d %v", code, resp)
+	}
+	code, resp := doJSON(t, ts, http.MethodGet, "/v1/cases/pure-water-zero", "")
+	if code != http.StatusOK {
+		t.Fatalf("读回失败: %d %v", code, resp)
+	}
+	feed, _ := resp["feed"].(map[string]any)
+	molarity, present := feed["molarity_mol_per_l"]
+	if !present || molarity != 0.0 {
+		t.Fatalf("显式提交的 molarity_mol_per_l=0 读回时丢失或变值: %v", feed)
+	}
+	// 没提交的字段不得凭空出现。
+	if _, present := feed["mass_concentration_g_per_l"]; present {
+		t.Fatalf("未提交的质量浓度不应出现在读回结果里: %v", feed)
+	}
+	if _, present := feed["molar_mass_g_per_mol"]; present {
+		t.Fatalf("未提交的摩尔质量不应出现在读回结果里: %v", feed)
+	}
+
+	// 点名核算这份纯水档：渗透压必须为 0。
+	code, resp = doJSON(t, ts, http.MethodPost, "/v1/cases/pure-water-zero/evaluate", "")
+	if code != http.StatusOK {
+		t.Fatalf("纯水档核算失败: %d %v", code, resp)
+	}
+	if pi, _ := resp["feed_osmotic_pressure_bar"].(float64); pi != 0 {
+		t.Fatalf("纯水渗透压应为 0，实际 %v", pi)
+	}
+}
+
+func TestAdhocEvaluate_PureWaterExplicitZeroAccepted(t *testing.T) {
+	_, ts := newTestServer()
+	defer ts.Close()
+
+	// 两种纯水写法照旧按 0 mol/L 出结果：
+	// 只带 molarity=0；或三项都带且 molarity=0、mass=0、摩尔质量为正。
+	bodies := []string{
+		`{"feed": {"molarity_mol_per_l": 0, "temperature_k": 298.15, "vanth_hoff_factor": 2},`,
+		`{"feed": {"molarity_mol_per_l": 0, "mass_concentration_g_per_l": 0,
+		           "molar_mass_g_per_mol": 58.44, "temperature_k": 298.15, "vanth_hoff_factor": 2},`,
+	}
+	for i, head := range bodies {
+		body := head + `
+		  "applied_pressure_bar": 12, "feed_flow_lh": 1000,
+		  "permeability_lmh_per_bar": 1.8, "area_m2": 36, "salt_rejection": 1}`
+		code, resp := doJSON(t, ts, http.MethodPost, "/v1/evaluate", body)
+		if code != http.StatusOK {
+			t.Fatalf("纯水写法 %d 应 200，实际 %d %v", i, code, resp)
+		}
+		if c, _ := resp["feed_molarity_mol_per_l"].(float64); c != 0 {
+			t.Fatalf("纯水写法 %d 摩尔浓度应为 0，实际 %v", i, c)
+		}
+		if pi, _ := resp["feed_osmotic_pressure_bar"].(float64); pi != 0 {
+			t.Fatalf("纯水写法 %d 渗透压应为 0，实际 %v", i, pi)
+		}
+	}
+}

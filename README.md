@@ -23,6 +23,7 @@
 公式：
 
 - 渗透压：`π = i·C·R·T`（NaCl 取 i=2）。浓度可直接给 mol/L，也可给 g/L + g/mol 换算；两种口径同时给时必须自洽（相对容差 1e-3），否则拒绝。
+- **「写了 0」与「没写」严格区分**：JSON 里出现过的浓度字段（`molarity_mol_per_l` / `mass_concentration_g_per_l` / `molar_mass_g_per_mol`）哪怕值是 0 也算「已给出」，参与自洽与缺项校验。显式 `molarity=0` 撞上非零质量浓度 → `inconsistent_concentration`；质量浓度显式出现（哪怕是 0）却缺摩尔质量 → `non_positive_parameter`。纯水写法照旧：只给 `molarity=0`，或三项都给且摩尔/质量浓度均为 0、摩尔质量为正。登记档 GET 读回时，显式给的 0 原样保留。
 - 净推动力：`NDP = Δp − β·πf + πp`，β 为浓差极化因子（β≥1，1 表示无极化）。这里的 Δp 是**已经扣过产水背压的工作压差**，全链路只在 bar 量纲下相减。
 - 产水流量：`Qp = A·Lp·NDP`（L/h）。
 - 回收率：`Y = Qp/Qf`，必须落在**开区间 (0,1)**。

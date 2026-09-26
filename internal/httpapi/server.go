@@ -196,14 +196,19 @@ func specFromDTO(dto specDTO) (cases.Spec, error) {
 		Temperature: dto.Feed.TemperatureK,
 		VanTHoff:    dto.Feed.VanTHoff,
 	}
+	// 字段在 JSON 里出现过（哪怕值是 0）就置显式标记：
+	// 「写了 0」与「没写」必须区分开，内核按标记做自洽与缺项校验。
 	if dto.Feed.Molarity != nil {
 		feed.Molarity = *dto.Feed.Molarity
+		feed.MolaritySet = true
 	}
 	if dto.Feed.MassConcentration != nil {
 		feed.MassConcentration = *dto.Feed.MassConcentration
+		feed.MassConcentrationSet = true
 	}
 	if dto.Feed.MolarMass != nil {
 		feed.MolarMass = *dto.Feed.MolarMass
+		feed.MolarMassSet = true
 	}
 	return cases.Spec{
 		Name: dto.Name,
